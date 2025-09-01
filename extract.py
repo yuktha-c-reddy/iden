@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import random
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # Configuration
@@ -81,44 +82,109 @@ def navigate_to_challenge(page):
             print("Direct navigation also failed")
             return False
 
+def scroll_to_load_more(page, scroll_count):
+    """Scroll to load more products"""
+    print(f"Scrolling to load more products (scroll {scroll_count})...")
+    
+    # Scroll to the bottom of the page
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    
+    # Wait for new content to load
+    time.sleep(2)
+    
+    # Check if there's a loading indicator or if more products appear
+    try:
+        page.wait_for_function("""
+            () => {
+                const loadingIndicator = document.querySelector('.loading, .spinner, [aria-busy="true"]');
+                return loadingIndicator === null;
+            }
+        """, timeout=5000)
+    except:
+        time.sleep(1)
+    
+    # Check if we've reached the end
+    end_of_content = page.evaluate("""
+        () => {
+            return document.body.textContent.includes('No more') || 
+                   document.body.textContent.includes('End of') ||
+                   document.body.textContent.includes('All products loaded') ||
+                   document.querySelector('[data-end-of-list]') !== null;
+        }
+    """)
+    
+    return not end_of_content
+
 def extract_product_data(page):
-    """Extract all product data from the grid with pagination handling"""
+    """Extract all product data with scrolling to load more products"""
     print("Extracting product data...")
     
     all_products = []
-    page_count = 1
+    seen_ids = set()
+    scroll_count = 0
+    max_scrolls = 200  # Increased for 1800 products
+    no_new_products_count = 0
+    previous_product_count = 0
     
-    while True:
-        print(f"Processing page {page_count}...")
+    while scroll_count < max_scrolls:
+        print(f"Processing after {scroll_count} scrolls...")
         
         # Wait for product grid to be visible
         page.wait_for_selector('.grid > div', timeout=10000)
         
-        # Get all product cards (each div in the grid)
+        # Get all product cards
         product_cards = page.query_selector_all('.grid > div')
+        current_product_count = len(product_cards)
+        print(f"Found {current_product_count} total products so far")
         
-        print(f"Found {len(product_cards)} products on page {page_count}")
+        # If no new products were loaded, check if we're done
+        if current_product_count == previous_product_count:
+            no_new_products_count += 1
+            if no_new_products_count >= 3:
+                print("No new products loaded in consecutive scrolls. Assuming all products loaded.")
+                break
+        else:
+            no_new_products_count = 0
+            previous_product_count = current_product_count
         
         # Extract data from each product card
-        for card in product_cards:
+        new_products_count = 0
+        for i, card in enumerate(product_cards):
             try:
-                # Extract product name
-                name_element = card.query_selector('h3')
-                name = name_element.inner_text().strip() if name_element else "N/A"
+                # Get the visible text content first for debugging
+                card_text = card.inner_text()
                 
-                # Extract category from the badge
-                category_element = card.query_selector('[class*="rounded-full"][class*="border"][class*="px-2.5"][class*="py-0.5"][class*="text-xs"]')
-                category = category_element.inner_text().strip() if category_element else "N/A"
+                # Extract product ID - more precise method
+                id_element = card.query_selector('p.text-xs.text-muted-foreground.font-mono')
+                if not id_element:
+                    id_element = card.query_selector('p.font-mono')
                 
-                # Extract ID from the monospace text
-                id_element = card.query_selector('p.font-mono')
                 product_id = "N/A"
                 if id_element:
                     id_text = id_element.inner_text().strip()
                     if 'ID:' in id_text:
-                        product_id = id_text.split('ID:')[1].strip()
+                        product_id = id_text.split('ID:')[1].strip().split()[0]  # Get only the ID number
                 
-                # Extract details from the description list
+                # Skip if we've already processed this product or no ID found
+                if product_id in seen_ids or product_id == "N/A":
+                    continue
+                
+                seen_ids.add(product_id)
+                new_products_count += 1
+                
+                # Extract product name - more precise selector
+                name_element = card.query_selector('h3.font-semibold')
+                if not name_element:
+                    name_element = card.query_selector('h3')
+                name = name_element.inner_text().strip() if name_element else "N/A"
+                
+                # Extract category - look for the badge with specific classes
+                category_element = card.query_selector('.inline-flex.items-center.rounded-full.border.px-2\\.5.py-0\\.5.text-xs')
+                if not category_element:
+                    category_element = card.query_selector('[class*="rounded-full"][class*="border"][class*="px-2.5"][class*="py-0.5"][class*="text-xs"]')
+                category = category_element.inner_text().strip() if category_element else "N/A"
+                
+                # Extract details using more precise selectors
                 details = {
                     "dimensions": "N/A",
                     "color": "N/A",
@@ -127,28 +193,30 @@ def extract_product_data(page):
                     "mass": "N/A"
                 }
                 
-                # Get all detail items
-                detail_items = card.query_selector_all('dl.text-sm > div')
+                # Get all detail items using the specific structure
+                detail_items = card.query_selector_all('dl.space-y-2.text-sm > div.flex.items-center.justify-between')
+                
                 for item in detail_items:
-                    dt = item.query_selector('dt')
-                    dd = item.query_selector('dd')
+                    dt = item.query_selector('dt.text-muted-foreground')
+                    dd = item.query_selector('dd.font-medium')
+                    
                     if dt and dd:
-                        key = dt.inner_text().strip().lower().replace(':', '').replace(' (kg)', '').replace(' ', '_')
+                        label = dt.inner_text().strip().lower()
                         value = dd.inner_text().strip()
                         
-                        if 'mass' in key:
-                            details['mass'] = f"{value} kg"
-                        elif 'dimensions' in key:
-                            details['dimensions'] = value
-                        elif 'color' in key:
-                            details['color'] = value
-                        elif 'price' in key:
-                            details['price'] = value
-                        elif 'brand' in key:
-                            details['brand'] = value
+                        if 'dimensions' in label:
+                            details["dimensions"] = value
+                        elif 'color' in label:
+                            details["color"] = value
+                        elif 'price' in label:
+                            details["price"] = value
+                        elif 'brand' in label:
+                            details["brand"] = value
+                        elif 'mass' in label:
+                            details["mass"] = f"{value} kg" if value and 'kg' not in value else value
                 
-                # Extract updated date
-                updated_element = card.query_selector('span:has-text("Updated:")')
+                # Extract updated date - more precise selector
+                updated_element = card.query_selector('div.items-center.p-6.pt-2.border-t span')
                 updated = "N/A"
                 if updated_element:
                     updated_text = updated_element.inner_text().strip()
@@ -170,36 +238,44 @@ def extract_product_data(page):
                 
                 all_products.append(product_data)
                 
+                # Print sample for verification
+                if len(all_products) % 100 == 0:
+                    print(f"Sample product {len(all_products)}: {product_data['name']} (ID: {product_data['id']})")
+                
             except Exception as e:
-                print(f"Error extracting product: {e}")
+                print(f"Error extracting product {i}: {e}")
                 continue
         
-        # Check for pagination and navigate to next page if available
-        try:
-            # Look for next page button
-            next_button = page.query_selector('button:has-text("Next"), [aria-label="Next page"]')
-            
-            if next_button and not next_button.get_attribute('disabled'):
-                print("Moving to next page...")
-                next_button.click()
-                # Wait for page to load
-                time.sleep(2)
-                page_count += 1
-            else:
-                print("No more pages available")
-                break
-                
-        except Exception as e:
-            print(f"Error navigating to next page: {e}")
+        print(f"Added {new_products_count} new products in this batch")
+        
+        # If we've found 1800+ products, we're probably done
+        if len(all_products) >= 1800:
+            print(f"Reached target of {len(all_products)} products")
             break
+        
+        # Scroll to load more products
+        scroll_count += 1
+        has_more_content = scroll_to_load_more(page, scroll_count)
+        
+        if not has_more_content:
+            print("Reached end of content")
+            break
+        
+        # Add a small random delay
+        time.sleep(random.uniform(0.5, 1.5))
     
-    print(f"Extracted {len(all_products)} products in total")
+    print(f"Extracted {len(all_products)} products in total after {scroll_count} scrolls")
+    
+    # Verify we have the expected number
+    if len(all_products) < 1830:
+        print(f"Warning: Expected 1830 products but only found {len(all_products)}")
+    
     return all_products
 
 def main():
     with sync_playwright() as p:
         # Launch browser
-        browser = p.chromium.launch(headless=False)  # Set to False to see what's happening
+        browser = p.chromium.launch(headless=False)
         context = None
         
         # Try to load existing session
@@ -243,7 +319,7 @@ def main():
                     page.screenshot(path="challenge_page.png")
                     print("Screenshot saved as challenge_page.png")
             
-            # Extract data from product cards
+            # Extract data from product cards with scrolling
             products = extract_product_data(page)
             
             # Export data to JSON
@@ -252,15 +328,18 @@ def main():
             
             print(f"Data successfully exported to {OUTPUT_FILE}")
             
+            # Print a sample of the extracted data for verification
+            print("\nSample of extracted data:")
+            for i, product in enumerate(products[:3]):
+                print(f"Product {i+1}: {product}")
+            
         except PlaywrightTimeoutError as e:
             print(f"Timeout error: {e}")
         except Exception as e:
             print(f"An error occurred: {e}")
-            # Take screenshot for debugging
             page.screenshot(path="error_screenshot.png")
             print("Screenshot saved as error_screenshot.png")
         finally:
-            # Close browser
             browser.close()
 
 if __name__ == "__main__":
