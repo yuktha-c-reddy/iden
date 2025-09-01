@@ -85,3 +85,5 @@ browser = p.chromium.launch(headless=True)
 ---
 ## Table attempt:
 I was able to comprehend that layout:table for table view instead of layout: cards beside assessment id but my methods to switch to table was not successful like expected.
+<br/> One issue faced sometimes 
+<img width="1649" height="269" alt="image" src="https://github.com/user-attachments/assets/daedab01-a782-4a47-aa2c-ec8e5f243a82" />
