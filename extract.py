@@ -46,27 +46,43 @@ def authenticate(page):
     page.click('button[type="submit"]')
     
     # Wait for navigation to instructions page
-    page.wait_for_url(INSTRUCTIONS_URL, timeout=15000)
-    
-    print("Authentication successful")
-    return page.context.storage_state()
+    try:
+        page.wait_for_url(INSTRUCTIONS_URL, timeout=15000)
+        print("Authentication successful")
+        return page.context.storage_state()
+    except PlaywrightTimeoutError:
+        print("Authentication might have succeeded but didn't navigate to instructions")
+        # Check if we're on a different page that indicates success
+        return page.context.storage_state()
 
 def navigate_to_challenge(page):
     """Navigate to the challenge page"""
     print("Navigating to challenge...")
     
     # Click the launch challenge button
-    launch_button = page.wait_for_selector('button:has-text("Launch Challenge")', timeout=10000)
-    launch_button.click()
-    print("Clicked launch challenge")
-    # Wait for challenge page to load
-    page.wait_for_url(CHALLENGE_URL, timeout=15000)
-    page.wait_for_selector('.product-card', timeout=10000)
-    
-    print("Successfully navigated to challenge page")
+    try:
+        launch_button = page.wait_for_selector('button:has-text("Launch Challenge")', timeout=10000)
+        launch_button.click()
+        print("Clicked launch challenge")
+        
+        # Wait for challenge page to load
+        page.wait_for_url(CHALLENGE_URL, timeout=15000)
+        print("Successfully navigated to challenge page")
+        return True
+    except PlaywrightTimeoutError:
+        print("Could not find launch button or navigate to challenge")
+        # Try direct navigation
+        page.goto(CHALLENGE_URL)
+        try:
+            page.wait_for_selector('.grid > div', timeout=10000)
+            print("Direct navigation to challenge succeeded")
+            return True
+        except PlaywrightTimeoutError:
+            print("Direct navigation also failed")
+            return False
 
 def extract_product_data(page):
-    """Extract all product data from the cards with pagination handling"""
+    """Extract all product data from the grid with pagination handling"""
     print("Extracting product data...")
     
     all_products = []
@@ -75,72 +91,82 @@ def extract_product_data(page):
     while True:
         print(f"Processing page {page_count}...")
         
-        # Wait for product cards to be visible
-        page.wait_for_selector('.product-card', timeout=10000)
+        # Wait for product grid to be visible
+        page.wait_for_selector('.grid > div', timeout=10000)
         
-        # Get all product cards
-        product_cards = page.query_selector_all('.product-card')
+        # Get all product cards (each div in the grid)
+        product_cards = page.query_selector_all('.grid > div')
         
         print(f"Found {len(product_cards)} products on page {page_count}")
         
         # Extract data from each product card
         for card in product_cards:
             try:
-                # Extract basic information
-                name = card.query_selector('.product-name, h2, h3, h4').inner_text().strip()
-                category = card.query_selector('.product-category, .category').inner_text().strip()
+                # Extract product name
+                name_element = card.query_selector('h3')
+                name = name_element.inner_text().strip() if name_element else "N/A"
                 
-                # Extract ID - looking for text that contains "ID:"
-                id_text = card.query_selector('*:has-text("ID:")').inner_text()
-                product_id = id_text.split('ID:')[1].strip().split()[0] if 'ID:' in id_text else "N/A"
+                # Extract category from the badge
+                category_element = card.query_selector('[class*="rounded-full"][class*="border"][class*="px-2.5"][class*="py-0.5"][class*="text-xs"]')
+                category = category_element.inner_text().strip() if category_element else "N/A"
                 
-                # Initialize product data
-                product_data = {
-                    "id": product_id,
-                    "name": name,
-                    "category": category,
+                # Extract ID from the monospace text
+                id_element = card.query_selector('p.font-mono')
+                product_id = "N/A"
+                if id_element:
+                    id_text = id_element.inner_text().strip()
+                    if 'ID:' in id_text:
+                        product_id = id_text.split('ID:')[1].strip()
+                
+                # Extract details from the description list
+                details = {
                     "dimensions": "N/A",
                     "color": "N/A",
                     "price": "N/A",
                     "brand": "N/A",
-                    "mass": "N/A",
-                    "updated": "N/A"
+                    "mass": "N/A"
                 }
                 
-                # Extract details that might be in various formats
-                card_text = card.inner_text()
-                
-                # Extract dimensions
-                if 'Dimensions:' in card_text:
-                    dimensions_part = card_text.split('Dimensions:')[1].split('\n')[0].strip()
-                    product_data["dimensions"] = dimensions_part
-                
-                # Extract color
-                if 'Color:' in card_text:
-                    color_part = card_text.split('Color:')[1].split('\n')[0].strip()
-                    product_data["color"] = color_part
-                
-                # Extract price
-                if 'Price:' in card_text:
-                    price_part = card_text.split('Price:')[1].split('\n')[0].strip()
-                    product_data["price"] = price_part
-                
-                # Extract brand
-                if 'Brand:' in card_text:
-                    brand_part = card_text.split('Brand:')[1].split('\n')[0].strip()
-                    product_data["brand"] = brand_part
-                
-                # Extract mass
-                if 'Mass' in card_text and 'kg' in card_text:
-                    mass_part = card_text.split('Mass')[1].split('kg')[0].strip()
-                    if ':' in mass_part:
-                        mass_part = mass_part.split(':')[1].strip()
-                    product_data["mass"] = f"{mass_part} kg"
+                # Get all detail items
+                detail_items = card.query_selector_all('dl.text-sm > div')
+                for item in detail_items:
+                    dt = item.query_selector('dt')
+                    dd = item.query_selector('dd')
+                    if dt and dd:
+                        key = dt.inner_text().strip().lower().replace(':', '').replace(' (kg)', '').replace(' ', '_')
+                        value = dd.inner_text().strip()
+                        
+                        if 'mass' in key:
+                            details['mass'] = f"{value} kg"
+                        elif 'dimensions' in key:
+                            details['dimensions'] = value
+                        elif 'color' in key:
+                            details['color'] = value
+                        elif 'price' in key:
+                            details['price'] = value
+                        elif 'brand' in key:
+                            details['brand'] = value
                 
                 # Extract updated date
-                if 'Updated:' in card_text:
-                    updated_part = card_text.split('Updated:')[1].split('\n')[0].strip()
-                    product_data["updated"] = updated_part
+                updated_element = card.query_selector('span:has-text("Updated:")')
+                updated = "N/A"
+                if updated_element:
+                    updated_text = updated_element.inner_text().strip()
+                    if 'Updated:' in updated_text:
+                        updated = updated_text.split('Updated:')[1].strip()
+                
+                # Create product data object
+                product_data = {
+                    "id": product_id,
+                    "name": name,
+                    "category": category,
+                    "dimensions": details["dimensions"],
+                    "color": details["color"],
+                    "price": details["price"],
+                    "brand": details["brand"],
+                    "mass": details["mass"],
+                    "updated": updated
+                }
                 
                 all_products.append(product_data)
                 
@@ -150,14 +176,14 @@ def extract_product_data(page):
         
         # Check for pagination and navigate to next page if available
         try:
-            # Look for next page button - this might need adjustment based on actual UI
-            next_button = page.query_selector('button:has-text("Next"), .next-page, [aria-label="Next page"]')
+            # Look for next page button
+            next_button = page.query_selector('button:has-text("Next"), [aria-label="Next page"]')
             
             if next_button and not next_button.get_attribute('disabled'):
                 print("Moving to next page...")
                 next_button.click()
                 # Wait for page to load
-                time.sleep(2)  # Adjust as needed
+                time.sleep(2)
                 page_count += 1
             else:
                 print("No more pages available")
@@ -173,7 +199,7 @@ def extract_product_data(page):
 def main():
     with sync_playwright() as p:
         # Launch browser
-        browser = p.chromium.launch(headless=True)  # Set to True for headless execution
+        browser = p.chromium.launch(headless=False)  # Set to False to see what's happening
         context = None
         
         # Try to load existing session
@@ -196,19 +222,26 @@ def main():
             page.goto(BASE_URL)
             
             # Check if we're on login page or already logged in
-            if page.url == LOGIN_URL or page.query_selector('input[name="username"]'):
+            if page.url == LOGIN_URL or page.query_selector('input[type="email"]'):
                 # Need to authenticate
                 storage_state = authenticate(page)
                 save_session(storage_state)
             
             # If we're on instructions page, navigate to challenge
             if page.url == INSTRUCTIONS_URL:
-                navigate_to_challenge(page)
+                if not navigate_to_challenge(page):
+                    print("Failed to navigate to challenge page")
+                    return
             
             # If we're not on challenge page yet, navigate to it
             if page.url != CHALLENGE_URL:
                 page.goto(CHALLENGE_URL)
-                page.wait_for_selector('.product-card', timeout=10000)
+                try:
+                    page.wait_for_selector('.grid > div', timeout=10000)
+                except PlaywrightTimeoutError:
+                    print("Challenge page didn't load expected elements")
+                    page.screenshot(path="challenge_page.png")
+                    print("Screenshot saved as challenge_page.png")
             
             # Extract data from product cards
             products = extract_product_data(page)
@@ -231,4 +264,4 @@ def main():
             browser.close()
 
 if __name__ == "__main__":
-    main() 
+    main()
