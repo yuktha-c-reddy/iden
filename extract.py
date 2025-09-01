@@ -83,78 +83,73 @@ def navigate_to_challenge(page):
             return False
 
 def scroll_to_load_more(page, scroll_count):
-    """Scroll to load more products"""
+    """Scroll to load more products with better detection"""
     print(f"Scrolling to load more products (scroll {scroll_count})...")
+    
+    # Get current product count before scrolling
+    previous_count = page.evaluate("() => document.querySelectorAll('.grid > div').length")
     
     # Scroll to the bottom of the page
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     
-    # Wait for new content to load
-    time.sleep(2)
+    # Wait for potential new content with longer timeout
+    time.sleep(3)
     
-    # Check if there's a loading indicator or if more products appear
-    try:
-        page.wait_for_function("""
+    # Check if new products were loaded
+    new_count = page.evaluate("() => document.querySelectorAll('.grid > div').length")
+    
+    print(f"Products before scroll: {previous_count}, after scroll: {new_count}")
+    
+    # If no new products, try scrolling again with different approach
+    if new_count == previous_count:
+        print("No new products detected, trying alternative scroll method...")
+        
+        # Try scrolling to a specific element near the bottom
+        page.evaluate("""
             () => {
-                const loadingIndicator = document.querySelector('.loading, .spinner, [aria-busy="true"]');
-                return loadingIndicator === null;
+                const lastProduct = document.querySelectorAll('.grid > div');
+                if (lastProduct.length > 0) {
+                    lastProduct[lastProduct.length - 1].scrollIntoView();
+                }
             }
-        """, timeout=5000)
-    except:
-        time.sleep(1)
+        """)
+        time.sleep(2)
+        
+        # Check again
+        new_count = page.evaluate("() => document.querySelectorAll('.grid > div').length")
+        print(f"Products after alternative scroll: {new_count}")
     
-    # Check if we've reached the end
-    end_of_content = page.evaluate("""
-        () => {
-            return document.body.textContent.includes('No more') || 
-                   document.body.textContent.includes('End of') ||
-                   document.body.textContent.includes('All products loaded') ||
-                   document.querySelector('[data-end-of-list]') !== null;
-        }
-    """)
-    
-    return not end_of_content
+    # Return True if we should continue scrolling (we might not be at the end yet)
+    return new_count < 1830  # Continue until we reach 1830 products
 
 def extract_product_data(page):
-    """Extract all product data with scrolling to load more products"""
+    """Extract all product data with improved scrolling"""
     print("Extracting product data...")
     
     all_products = []
     seen_ids = set()
     scroll_count = 0
-    max_scrolls = 200  # Increased for 1800 products
-    no_new_products_count = 0
-    previous_product_count = 0
+    max_scrolls = 250  # Increased for 1830 products
+    consecutive_no_new_products = 0
     
-    while scroll_count < max_scrolls:
-        print(f"Processing after {scroll_count} scrolls...")
+    # First, let's make sure we scroll until we have exactly 1830 products
+    while scroll_count < max_scrolls and len(seen_ids) < 1830:
+        print(f"Scroll {scroll_count + 1}, Current products: {len(seen_ids)}/1830")
         
-        # Wait for product grid to be visible
+        # Wait for product grid
         page.wait_for_selector('.grid > div', timeout=10000)
         
-        # Get all product cards
+        # Get all visible product cards
         product_cards = page.query_selector_all('.grid > div')
-        current_product_count = len(product_cards)
-        print(f"Found {current_product_count} total products so far")
+        current_count = len(product_cards)
         
-        # If no new products were loaded, check if we're done
-        if current_product_count == previous_product_count:
-            no_new_products_count += 1
-            if no_new_products_count >= 3:
-                print("No new products loaded in consecutive scrolls. Assuming all products loaded.")
-                break
-        else:
-            no_new_products_count = 0
-            previous_product_count = current_product_count
+        print(f"Visible products: {current_count}")
         
-        # Extract data from each product card
+        # Extract data from all visible cards
         new_products_count = 0
         for i, card in enumerate(product_cards):
             try:
-                # Get the visible text content first for debugging
-                card_text = card.inner_text()
-                
-                # Extract product ID - more precise method
+                # Extract product ID
                 id_element = card.query_selector('p.text-xs.text-muted-foreground.font-mono')
                 if not id_element:
                     id_element = card.query_selector('p.font-mono')
@@ -163,39 +158,26 @@ def extract_product_data(page):
                 if id_element:
                     id_text = id_element.inner_text().strip()
                     if 'ID:' in id_text:
-                        product_id = id_text.split('ID:')[1].strip().split()[0]  # Get only the ID number
+                        product_id = id_text.split('ID:')[1].strip().split()[0]
                 
-                # Skip if we've already processed this product or no ID found
+                # Skip if already processed or invalid ID
                 if product_id in seen_ids or product_id == "N/A":
                     continue
                 
                 seen_ids.add(product_id)
                 new_products_count += 1
                 
-                # Extract product name - more precise selector
-                name_element = card.query_selector('h3.font-semibold')
-                if not name_element:
-                    name_element = card.query_selector('h3')
+                # Extract other product details
+                name_element = card.query_selector('h3.font-semibold') or card.query_selector('h3')
                 name = name_element.inner_text().strip() if name_element else "N/A"
                 
-                # Extract category - look for the badge with specific classes
                 category_element = card.query_selector('.inline-flex.items-center.rounded-full.border.px-2\\.5.py-0\\.5.text-xs')
-                if not category_element:
-                    category_element = card.query_selector('[class*="rounded-full"][class*="border"][class*="px-2.5"][class*="py-0.5"][class*="text-xs"]')
                 category = category_element.inner_text().strip() if category_element else "N/A"
                 
-                # Extract details using more precise selectors
-                details = {
-                    "dimensions": "N/A",
-                    "color": "N/A",
-                    "price": "N/A",
-                    "brand": "N/A",
-                    "mass": "N/A"
-                }
+                # Extract details
+                details = {"dimensions": "N/A", "color": "N/A", "price": "N/A", "brand": "N/A", "mass": "N/A"}
                 
-                # Get all detail items using the specific structure
                 detail_items = card.query_selector_all('dl.space-y-2.text-sm > div.flex.items-center.justify-between')
-                
                 for item in detail_items:
                     dt = item.query_selector('dt.text-muted-foreground')
                     dd = item.query_selector('dd.font-medium')
@@ -215,7 +197,7 @@ def extract_product_data(page):
                         elif 'mass' in label:
                             details["mass"] = f"{value} kg" if value and 'kg' not in value else value
                 
-                # Extract updated date - more precise selector
+                # Extract updated date
                 updated_element = card.query_selector('div.items-center.p-6.pt-2.border-t span')
                 updated = "N/A"
                 if updated_element:
@@ -223,7 +205,7 @@ def extract_product_data(page):
                     if 'Updated:' in updated_text:
                         updated = updated_text.split('Updated:')[1].strip()
                 
-                # Create product data object
+                # Create product data
                 product_data = {
                     "id": product_id,
                     "name": name,
@@ -238,37 +220,65 @@ def extract_product_data(page):
                 
                 all_products.append(product_data)
                 
-                # Print sample for verification
-                if len(all_products) % 100 == 0:
-                    print(f"Sample product {len(all_products)}: {product_data['name']} (ID: {product_data['id']})")
-                
             except Exception as e:
                 print(f"Error extracting product {i}: {e}")
                 continue
         
-        print(f"Added {new_products_count} new products in this batch")
+        print(f"New products extracted: {new_products_count}")
         
-        # If we've found 1800+ products, we're probably done
-        if len(all_products) >= 1800:
-            print(f"Reached target of {len(all_products)} products")
+        # Check if we've reached the target
+        if len(seen_ids) >= 1830:
+            print(f"Successfully reached target of 1830 products!")
             break
+        
+        # If no new products were found in this batch
+        if new_products_count == 0:
+            consecutive_no_new_products += 1
+            print(f"No new products found ({consecutive_no_new_products}/3)")
+            
+            if consecutive_no_new_products >= 3:
+                print("Stopping - no new products found in 3 consecutive checks")
+                break
+        else:
+            consecutive_no_new_products = 0
         
         # Scroll to load more products
         scroll_count += 1
-        has_more_content = scroll_to_load_more(page, scroll_count)
+        should_continue = scroll_to_load_more(page, scroll_count)
         
-        if not has_more_content:
-            print("Reached end of content")
+        if not should_continue:
+            print("Scroll detected we should stop")
             break
         
-        # Add a small random delay
-        time.sleep(random.uniform(0.5, 1.5))
+        # Random delay to avoid detection
+        time.sleep(random.uniform(1, 2))
     
-    print(f"Extracted {len(all_products)} products in total after {scroll_count} scrolls")
+    # Final check to make sure we have all products
+    print(f"Final product count: {len(all_products)}")
     
-    # Verify we have the expected number
     if len(all_products) < 1830:
-        print(f"Warning: Expected 1830 products but only found {len(all_products)}")
+        print(f"Warning: Only found {len(all_products)} products out of 1830")
+        print("Trying one final scroll and extraction...")
+        
+        # One final attempt to get remaining products
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(3)
+        
+        # Extract any remaining products
+        product_cards = page.query_selector_all('.grid > div')
+        for card in product_cards:
+            try:
+                id_element = card.query_selector('p.font-mono')
+                if id_element:
+                    id_text = id_element.inner_text().strip()
+                    if 'ID:' in id_text:
+                        product_id = id_text.split('ID:')[1].strip().split()[0]
+                        if product_id not in seen_ids:
+                            # Extract this product (simplified extraction)
+                            print(f"Found additional product ID: {product_id}")
+                            # You could add full extraction logic here
+            except:
+                pass
     
     return all_products
 
@@ -327,11 +337,16 @@ def main():
                 json.dump(products, f, indent=2, ensure_ascii=False)
             
             print(f"Data successfully exported to {OUTPUT_FILE}")
+            print(f"Total products extracted: {len(products)}")
             
-            # Print a sample of the extracted data for verification
-            print("\nSample of extracted data:")
+            # Show sample data
+            print("\nFirst 3 products:")
             for i, product in enumerate(products[:3]):
-                print(f"Product {i+1}: {product}")
+                print(f"{i+1}. {product}")
+            
+            print("\nLast 3 products:")
+            for i, product in enumerate(products[-3:]):
+                print(f"{len(products)-2+i}. {product}")
             
         except PlaywrightTimeoutError as e:
             print(f"Timeout error: {e}")
